@@ -1,0 +1,10 @@
+# Calcify runtime dependencies
+PyQt5>=5.15
+matplotlib>=3.6
+numpy>=1.23
+pandas>=1.5
+scipy>=1.9
+
+# Build-time only (installed by the build scripts)
+pyinstaller>=6.0
+pyinstaller
