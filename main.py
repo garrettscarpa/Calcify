@@ -2,7 +2,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton, QCheckBox
+from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton, QCheckBox, QScrollArea
 from data_loader import DataLoader
 from ui_setup import build_ui
 from file_handler import filetype_changed, select_file_or_folder, populate_file_list
@@ -86,7 +86,21 @@ class CalciumImagingApp(QWidget):
         self.figures = []
 
         layout, ui = build_ui(self)
-        self.setLayout(layout)
+
+        # Put the full form inside a scroll area so the window stays usable on
+        # short screens (e.g. laptops). Without this, a window taller than the
+        # display cuts off the bottom buttons with no way to reach them.
+        inner = QWidget()
+        inner.setLayout(layout)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(scroll)
+        self.setLayout(outer_layout)
 
         # Widgets
         self.file_list_widget = ui['file_list_widget']
@@ -931,6 +945,9 @@ if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
     window = CalciumImagingApp()
-    window.resize(400, 600)
+    # Cap the initial height to the available screen so the window never opens
+    # taller than the display; the scroll area handles any overflow.
+    avail = app.primaryScreen().availableGeometry()
+    window.resize(400, min(600, avail.height() - 80))
     window.show()
     sys.exit(app.exec_())
