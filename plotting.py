@@ -226,7 +226,15 @@ class InteractivePlotter:
 
 
 
-        self.ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        # Center the legend under the button column and vertically beside
+        # ax2 (the lower/zoomed panel). The buttons span x=0.83..0.98 in
+        # figure coords (center ~0.905); ax2 spans y≈0.11..0.43 (center
+        # ~0.27). Anchor on the legend's own center so it sits next to ax2.
+        self.ax2.legend(
+            loc='center',
+            bbox_to_anchor=(0.905, 0.27),
+            bbox_transform=self.fig.transFigure
+        )
         self.fig.canvas.draw_idle()
 
 

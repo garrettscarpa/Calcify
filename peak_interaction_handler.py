@@ -251,8 +251,15 @@ class InteractionHandler:
         if not roi_ids:
             return
         n = len(roi_ids)
+        # Anchor on the ROI actually being displayed, not on a possibly-stale
+        # roi_idx. If current_roi and roi_idx have drifted apart, trusting
+        # roi_idx makes the scan start from the wrong place and skip an ROI.
+        try:
+            start_idx = roi_ids.index(self.plotter.current_roi)
+        except (ValueError, AttributeError):
+            start_idx = self.plotter.roi_idx
         for step in range(1, n + 1):
-            candidate_idx = (self.plotter.roi_idx + step) % n
+            candidate_idx = (start_idx + step) % n
             self.plotter.roi_idx = candidate_idx
             self.plotter.current_roi = roi_ids[candidate_idx]
             self.plotter.peaks_in_roi = self.plotter._get_peaks_for_current_roi()
@@ -269,8 +276,13 @@ class InteractionHandler:
         if not roi_ids:
             return
         n = len(roi_ids)
+        # Anchor on the displayed ROI (see advance_to_next_peak).
+        try:
+            start_idx = roi_ids.index(self.plotter.current_roi)
+        except (ValueError, AttributeError):
+            start_idx = self.plotter.roi_idx
         for step in range(1, n + 1):
-            candidate_idx = (self.plotter.roi_idx - step) % n
+            candidate_idx = (start_idx - step) % n
             self.plotter.roi_idx = candidate_idx
             self.plotter.current_roi = roi_ids[candidate_idx]
             self.plotter.peaks_in_roi = self.plotter._get_peaks_for_current_roi()
@@ -337,12 +349,40 @@ class InteractionHandler:
     
         export_peaks_df['cell_id'] = export_peaks_df['cell_id'].apply(safe_transform)
     
+        # --- Numeric sort key from the trailing ROI number (so ROI_2 < ROI_10) ---
+        def roi_sort_key(cell_id):
+            m = re.search(r'(\d+)$', str(cell_id))
+            return int(m.group(1)) if m else np.inf
+
+        # --- Sort filtered peaks by ROI (smallest to largest), then peak_time ---
+        export_peaks_df['_roi_order'] = export_peaks_df['cell_id'].apply(roi_sort_key)
+        export_peaks_df = export_peaks_df.sort_values(
+            ['_roi_order', 'peak_time']
+        ).drop(columns='_roi_order').reset_index(drop=True)
+    
         # --- Save filtered peaks ---
         filtered_peaks_filename = os.path.join(
             export_dir, f"{file_prefix}_filtered_peaks.csv"
         )
         export_peaks_df.to_csv(filtered_peaks_filename, index=False)
         print(f"Exported filtered peaks to {filtered_peaks_filename}")
+    
+        # --- Save averaged filtered peaks (per-ROI means, sorted by ROI) ---
+        avg_cols = ['prominences', 'auc', 'half_rise_time', 'half_decay_time']
+        averaged_peaks_df = (
+            export_peaks_df
+            .groupby('cell_id', as_index=False)[avg_cols]
+            .mean()
+        )
+        averaged_peaks_df['_roi_order'] = averaged_peaks_df['cell_id'].apply(roi_sort_key)
+        averaged_peaks_df = averaged_peaks_df.sort_values(
+            '_roi_order'
+        ).drop(columns='_roi_order').reset_index(drop=True)
+        averaged_peaks_filename = os.path.join(
+            export_dir, f"{file_prefix}_filtered_peaks_averaged.csv"
+        )
+        averaged_peaks_df.to_csv(averaged_peaks_filename, index=False)
+        print(f"Exported averaged filtered peaks to {averaged_peaks_filename}")
     
         # ---------------------------------------------------------------------
         # ROI statistics
@@ -448,6 +488,19 @@ class InteractionHandler:
         timelocked_peaks_df.to_csv(timelocked_peaks_filename, index=False)
         print(f"Exported timelocked filtered peaks to {timelocked_peaks_filename}")
     
+        # --- Overwrite averaged file with per-period averages (sorted by ROI) ---
+        averaged_timelocked_df = (
+            timelocked_peaks_df
+            .groupby(['cell_id', 'time_period'], as_index=False)[avg_cols]
+            .mean()
+        )
+        averaged_timelocked_df['_roi_order'] = averaged_timelocked_df['cell_id'].apply(roi_sort_key)
+        averaged_timelocked_df = averaged_timelocked_df.sort_values(
+            ['_roi_order', 'time_period']
+        ).drop(columns='_roi_order').reset_index(drop=True)
+        averaged_timelocked_df.to_csv(averaged_peaks_filename, index=False)
+        print(f"Exported per-period averaged filtered peaks to {averaged_peaks_filename}")
+    
         # --- Timelocked statistics ---
         timelocked_stats = []
         for roi in all_rois:
@@ -494,18 +547,67 @@ class InteractionHandler:
     
     
            
+    def export_peak_rois(self, event=None):
+        """
+        Export a CSV where each ROI that contains at least one peak is a row:
+        the first column is the ROI name, and the remaining columns are that
+        ROI's raw (full) trace values.
+        """
+        export_dir = getattr(self, 'directory', ".")
+        file_prefix = getattr(self, 'file_prefix', "exported_data")
+
+        # Same ROI-name normalization used in export_csv, so names match.
+        def safe_transform(x):
+            if isinstance(x, (int, float, np.integer, np.floating)):
+                return f"ROI_{int(x)}"
+            if isinstance(x, str) and x.isdigit():
+                return f"ROI_{int(x)}"
+            return str(x)
+
+        # ROIs that actually contain a peak, in trace order.
+        rois_with_peaks = set(self.peak_results_df['cell_id'].unique())
+        ordered_rois = [roi for roi in self.trace.index if roi in rois_with_peaks]
+
+        if not ordered_rois:
+            QMessageBox.warning(None, "No Peaks",
+                                "No ROIs contain peaks to export.")
+            return
+
+        # Build one row per ROI: [ROI name, raw sample 0, raw sample 1, ...]
+        rows = self.trace.loc[ordered_rois].copy()
+        rows.insert(0, 'ROI', [safe_transform(r) for r in ordered_rois])
+
+        # Name the sample columns clearly.
+        n_samples = self.trace.shape[1]
+        rows.columns = ['ROI'] + [f"sample_{i}" for i in range(n_samples)]
+
+        out_filename = os.path.join(
+            export_dir, f"{file_prefix}_peak_ROI_traces.csv"
+        )
+        rows.to_csv(out_filename, index=False)
+        print(f"Exported peak ROI traces to {out_filename}")
+        QMessageBox.information(
+            None, "Export Complete",
+            f"Exported {len(ordered_rois)} ROI trace(s) to:\n{out_filename}"
+        )
+
     def setup_buttons(self):
         button_config = [
             ('Add Peak', self.toggle_add_peak_mode, 0.95), 
-            ('Reject', self.reject_peak, 0.9),
+            ('Reject Peak', self.reject_peak, 0.9),
             ('Undo Reject', self.undo_rejection, 0.85),
-            ('Next', self.advance_to_next_peak, 0.8),
-            ('Last', self.go_to_last_peak, 0.75),
-            ('Export', self.export_csv, 0.7)
+            ('Next Peak', self.advance_to_next_peak, 0.8),
+            ('Last Peak', self.go_to_last_peak, 0.75),
+            ('Save', self.export_csv, 0.7),
+            ('Export Peak ROIs', self.export_peak_rois, 0.65)
         ]
     
         for label, callback, y in button_config:
-            ax = self.fig.add_axes([0.8, y, 0.09, 0.04])
+            # All buttons share one size and sit in the right margin
+            # (the plots end at right=0.79), right-aligned with a small gap.
+            width = 0.15
+            x = 0.83
+            ax = self.fig.add_axes([x, y, width, 0.04])
             button = Button(ax, label)
             button.on_clicked(callback)
             self.buttons.append(button)  # Retain reference to prevent garbage collection

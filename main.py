@@ -2,7 +2,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton
+from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton, QCheckBox
 from data_loader import DataLoader
 from ui_setup import build_ui
 from file_handler import filetype_changed, select_file_or_folder, populate_file_list
@@ -449,6 +449,13 @@ class CalciumImagingApp(QWidget):
         )
         layout.addWidget(self.auto_remove_button)
 
+        # Optional average-trace overlay. Off by default (current behavior);
+        # when checked, plots the mean across all ROIs on top of the traces.
+        self.avg_trace_checkbox = QCheckBox("Show average trace")
+        self.avg_trace_checkbox.setChecked(False)
+        self.avg_trace_checkbox.toggled.connect(self.toggle_average_trace)
+        layout.addWidget(self.avg_trace_checkbox)
+
         self.ax = self.fig.add_subplot(111)
         
         # Set axis labels
@@ -467,6 +474,14 @@ class CalciumImagingApp(QWidget):
                 alpha=0.8
             )
             self.roi_lines[roi] = line
+
+        # Keep fs and time vector available for the average-trace toggle.
+        self._plot_all_fs = fs
+        self._plot_all_time = t
+        self.avg_trace_line = None
+        # Respect the checkbox state (default off, so normally a no-op).
+        if self.avg_trace_checkbox.isChecked():
+            self._draw_average_trace()
 
        
         self.span_selector = SpanSelector(
@@ -490,8 +505,39 @@ class CalciumImagingApp(QWidget):
         self.plot_window.show()
 
     # ------------------------------------------------------------------
-    # Span callback (selection only)
+    # Average-trace overlay
     # ------------------------------------------------------------------
+    def _draw_average_trace(self):
+        """Plot the mean trace across all ROIs as a thick black line."""
+        if not hasattr(self, "current_data") or self.current_data is None:
+            return
+        t = getattr(self, "_plot_all_time", None)
+        if t is None:
+            t = np.arange(self.current_data.shape[1]) / self._plot_all_fs
+
+        mean_trace = self.current_data.mean(axis=0).values
+        if self.avg_trace_line is not None:
+            # Update existing line in place.
+            self.avg_trace_line.set_data(t, mean_trace)
+        else:
+            self.avg_trace_line, = self.ax.plot(
+                t, mean_trace,
+                color='black', linewidth=2.5, alpha=0.9,
+                zorder=10, label='Average'
+            )
+        self.canvas.draw_idle()
+
+    def toggle_average_trace(self, checked):
+        """Show or hide the average-trace overlay based on the checkbox."""
+        if checked:
+            self._draw_average_trace()
+        else:
+            if getattr(self, "avg_trace_line", None) is not None:
+                self.avg_trace_line.remove()
+                self.avg_trace_line = None
+                self.canvas.draw_idle()
+
+
     def on_select_span(self, xmin, xmax):
         print("Span selected (stored only):", xmin, xmax)
         
@@ -607,6 +653,11 @@ class CalciumImagingApp(QWidget):
         # Update existing line data only
         for roi in self.current_data.index:
             self.roi_lines[roi].set_ydata(self.current_data.loc[roi])
+
+        # If the average overlay is currently shown, recompute it on the
+        # newly interpolated data so it stays in sync with the ROI traces.
+        if getattr(self, "avg_trace_line", None) is not None:
+            self._draw_average_trace()
         
         # Update artifact spans
         self.highlight_interpolated_regions(self.ax, fs)
