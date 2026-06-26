@@ -1,12 +1,23 @@
 # Calcify
 
-A flexible, GUI-based application for quantifying events from calcium imaging data. Calcify works with plain **CSV** files or with **Suite2p** (`.npy`) output folders, and runs as a standalone desktop app — no Python installation or coding required.
+A GUI application for quantifying events from calcium imaging data. Calcify works with plain CSV files or Suite2p (`.npy`) output folders, and runs as a standalone desktop app. No Python installation or coding required.
+
+---
+
+## Coming Soon
+
+The following features are in development:
+
+1. Missing data imputation for movement artifacts
+2. Averaging of all peaks in one file
+3. Autosave
+4. YAML configuration file to save default settings
 
 ---
 
 ## Download & Install
 
-Grab the latest build for your machine from the [**Releases**](../../releases) page.
+Get the latest build for your machine from the [Releases](../../releases) page.
 
 | Platform | Download |
 | --- | --- |
@@ -14,14 +25,14 @@ Grab the latest build for your machine from the [**Releases**](../../releases) p
 | macOS (Intel) | `Calcify-macOS-Intel.zip` |
 | Windows | `Calcify-v1.0.2-windows.zip` |
 
-Unzip the download, then move `Calcify.app` (macOS) into your **Applications** folder, or run it from wherever you like.
+Unzip the download, then move `Calcify.app` (macOS) into your Applications folder, or run it from wherever you like.
 
 ### First launch on macOS
 
-Because the app isn't notarized through the Apple Developer Program, macOS Gatekeeper will block it on the first open. To get around this:
+The app isn't notarized through the Apple Developer Program, so macOS Gatekeeper will block it the first time you open it. To get around this:
 
-- **Right-click** (or Control-click) `Calcify.app` → choose **Open** → confirm **Open** in the dialog. You only need to do this once.
-- If it still refuses, open **Terminal** and run:
+- Right-click (or Control-click) `Calcify.app`, choose **Open**, then confirm **Open** in the dialog. You only need to do this once.
+- If it still refuses, open Terminal and run:
   ```bash
   xattr -dr com.apple.quarantine /path/to/Calcify.app
   ```
@@ -34,22 +45,22 @@ After the first successful launch, you can open it normally.
 
 ### 1. Launch Calcify and point it at your data
 
-Open the app to bring up the main window. Here you select the folder containing your files and choose options such as the data format and whether the data need to be transposed.
+Open the app to bring up the main window, where you select the folder containing your files and choose options such as the data format and whether the data needs to be transposed.
 
-- **Transpose:** If the ROI labels are **column** titles, the data **need** to be transposed. If the ROI labels are **row** titles, they do **not**.
-- When you select a folder, Calcify automatically detects and lists every `.npy` or `.csv` file inside. Click the one you want to process to highlight it.
+- **Transpose:** If the ROI labels are column titles, the data needs to be transposed. If the ROI labels are row titles, it does not.
+- When you select a folder, Calcify detects and lists every `.npy` or `.csv` file inside. Click the one you want to process to highlight it.
 
-> ⚠️ **Suite2p users:** You **must** keep the option to **remove non-cell ROIs** enabled (it is checked by default). Disabling it will include ROIs that Suite2p flagged as non-cells.
+> ⚠️ **Suite2p users:** Keep the **remove non-cell ROIs** option enabled (it is checked by default). Disabling it will include ROIs that Suite2p flagged as non-cells.
 
 <img width="884" alt="Calcify main window" src="https://github.com/user-attachments/assets/3cb6df7e-acbc-4ac1-9209-011f3b19a5d5" />
 
 ### 2. Choose file type, select the parent folder, and set parameters
 
-Select the file type, then select the **parent folder** holding the file(s) you want to analyze — **not** the file itself. As long as the correct file type is selected, the file appears in the top window; click it to highlight it.
+Select the file type, then select the parent folder holding the file(s) you want to analyze, not the file itself. As long as the correct file type is selected, the file appears in the top window; click it to highlight it.
 
-Enter the parameters for your project, including the **sampling frequency (fs)**. Transpose the data if needed (Suite2p data typically does **not** need transposing; CSV data often **does**).
+Enter the parameters for your project, including the sampling frequency (fs). Transpose the data if needed. Suite2p data typically does not need transposing; CSV data often does.
 
-- **Treatment / stimulus:** If your recording has one, define a **pre** and **post** period. Detected peaks are then automatically assigned to the appropriate group.
+- **Treatment / stimulus:** If your recording has one, define a pre and post period. Detected peaks are then automatically assigned to the appropriate group.
 - **Drift:** If there's drift at the beginning of the recording, you can truncate it.
 
 ### 3. Plot all ROIs and check for artifacts
@@ -58,14 +69,14 @@ Click **Plot all ROIs** to check for artifacts that appear across every ROI, and
 
 If motion artifacts are present, you can:
 
-- Try **Auto Remove Motion Artifacts** (may need some tuning for your data), or
+- Try **Auto Remove Motion Artifacts** (this may need some tuning for your data), or
 - Highlight a portion of the signal and click **Remove Selected Region**. For each ROI, Calcify interpolates the signal between the start and end of the highlighted region.
 
-The example below does **not** contain motion artifacts:
+The example below does not contain motion artifacts:
 
 <img width="1017" alt="Plot all ROIs — clean signal" src="https://github.com/user-attachments/assets/876506ac-0cc3-4e91-873e-e391d290cb9d" />
 
-And here is how artifact removal behaves when there **are** substantial motion artifacts:
+And here is how artifact removal behaves when there are substantial motion artifacts:
 
 <img width="561" alt="Motion artifact example 1" src="https://github.com/user-attachments/assets/fa38e229-a6bc-4aa4-a9a9-cf7158451e6b" />
 <img width="561" alt="Motion artifact example 2" src="https://github.com/user-attachments/assets/74521028-bb04-4aab-b9e4-7a30befb5665" />
@@ -83,7 +94,7 @@ Controls:
 - **Next / Last** — cycle between ROIs
 - **Reject** — remove a peak
 - **Add Peak** — toggles add-peak mode; while active, click anywhere in the top window to create a new peak at that location
-- **Export** — saves all your changes so they persist when you reload the file, and writes all ROI statistics to the same location as your data file
+- **Export** — saves your changes so they persist when you reload the file, and writes all ROI statistics to the same location as your data file
 
 Remember to click **Export** to save your work.
 
@@ -97,7 +108,7 @@ Sample CSV and Suite2p datasets are available as a separate download on the [Rel
 
 ## Known Issues
 
-- **The Run Analysis window can freeze sporadically.** Until this is resolved, **save frequently** by clicking **Export** — for example, every few ROIs. If this is seriously disrupting your work, please open an issue and I'll prioritize the fix.
+- **The Run Analysis window can freeze sporadically.** Until this is fixed, save frequently by clicking **Export** — for example, every few ROIs. If this is seriously disrupting your work, please open an issue and I'll prioritize the fix.
 
 ---
 
