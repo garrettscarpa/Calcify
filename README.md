@@ -106,12 +106,6 @@ Sample CSV and Suite2p datasets are available as a separate download on the [Rel
 
 ---
 
-## Known Issues
-
-- **The Run Analysis window can freeze sporadically.** Until this is fixed, save frequently by clicking **Export** — for example, every few ROIs. If this is seriously disrupting your work, please open an issue and I'll prioritize the fix.
-
----
-
 ## Running from Source (for developers)
 
 If you'd rather run or modify the code directly:
