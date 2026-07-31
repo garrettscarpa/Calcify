@@ -109,7 +109,7 @@ class InteractivePlotter:
         self.ax1.clear()
         self.ax1.plot(time_axis, trace, label=f'ROI: {self.current_roi}')
         roi_count_str = f'ROI {self.roi_idx + 1} of {len(self.roi_ids)}'
-        self.ax1.set_title(f'Full Trace for {roi_count_str} [0-based ID: {self.current_roi}]')
+        self.ax1.set_title(f'Full Trace for {roi_count_str} [Suite2p ROI: {self.current_roi}]')        
         self.ax1.set_xlabel('Time (s)')
         self.ax1.set_ylabel('ΔF/F')
         self.ax1.grid(True)

@@ -125,6 +125,16 @@ class PeakDetector:
                 }
                 all_peaks.append(peak_info)
     
+        # If no peaks were detected, return an empty frame that still has the
+        # expected columns. Without this, pd.DataFrame([]) has no 'cell_id'
+        # column and .sort_values(['cell_id', 'peak_time']) raises
+        # KeyError: 'cell_id'.
+        expected_cols = ['cell_id', 'peak_time', 'left_bases', 'right_bases',
+                         'prominences', 'base_value', 'peak_value', 'auc',
+                         'time_to_peak', 'half_rise_time', 'half_decay_time']
+        if not all_peaks:
+            return pd.DataFrame(columns=expected_cols)
+
         return pd.DataFrame(all_peaks).sort_values(['cell_id', 'peak_time'])
 
 
@@ -175,8 +185,9 @@ def load_or_detect_peaks(app, file_path, smoothed_dff_df, fs,
             return None
 
         if peak_results_df.empty:
-            QMessageBox.warning(app, "No Peaks Found", "Saved peak file contains no peaks.")
-            return None
+            print("[INFO] Saved peak file contains no peaks — returning empty "
+                  "peak set so the figure can still launch.")
+            return peak_results_df
 
         # Ensure consistent ROI strings
         if "cell_id" in peak_results_df.columns:
@@ -214,8 +225,11 @@ def load_or_detect_peaks(app, file_path, smoothed_dff_df, fs,
     peak_results_df = detector.get_peak_dataframe()
 
     if peak_results_df.empty:
-        QMessageBox.warning(app, "No Peaks Detected",
-                            "No peaks were detected with the current parameters.")
-        return None
+        # Don't block with a modal popup here. The caller now launches the
+        # interactive figure with an empty peak set so the user can inspect
+        # traces and add peaks manually. Just log it.
+        print("[INFO] No peaks were detected with the current parameters — "
+              "returning an empty peak set.")
+        return peak_results_df
 
     return peak_results_df

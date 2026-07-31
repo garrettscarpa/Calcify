@@ -2,7 +2,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton, QCheckBox, QScrollArea
+from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QVBoxLayout, QPushButton, QCheckBox, QScrollArea, QFileDialog, QComboBox
 from data_loader import DataLoader
 from ui_setup import build_ui
 from file_handler import filetype_changed, select_file_or_folder, populate_file_list
@@ -12,6 +12,7 @@ from plotting import setup_plot_and_interaction
 from scipy.interpolate import CubicSpline
 import os
 import pandas as pd
+import json
 from matplotlib.widgets import SpanSelector
 from scipy.signal import butter, filtfilt
 cutoff_hz = 0.05
@@ -116,6 +117,11 @@ class CalciumImagingApp(QWidget):
         self.poly_order_input = ui['poly_order_input']
         self.smoothing_window_input = ui['smoothing_window_input']
         self.savgol_checkbox = ui['savgol_checkbox']
+        self.baseline_method_combo = ui['baseline_method_combo']
+        self.baseline_window_input = ui['baseline_window_input']
+        self.baseline_pctl_input = ui['baseline_pctl_input']
+        self.neuropil_checkbox = ui['neuropil_checkbox']
+        self.neuropil_coef_input = ui['neuropil_coef_input']
         self.display_window_input = ui['display_window_input']
         self.yax_input = ui['yax_input']
         self.transpose_checkbox = ui['transpose_checkbox']
@@ -124,6 +130,8 @@ class CalciumImagingApp(QWidget):
         self.run_button = ui['run_button']
         self.plot_all_button = ui['plot_all_button']
         self.cell_filter_checkbox = ui['cell_filter_checkbox']
+        self.save_settings_button = ui['save_settings_button']
+        self.load_settings_button = ui['load_settings_button']
 
         # Signals
         self.filetype_combo.currentIndexChanged.connect(lambda: filetype_changed(self))
@@ -131,6 +139,12 @@ class CalciumImagingApp(QWidget):
         self.npy_filename_input.textChanged.connect(lambda: populate_file_list(self))
         self.run_button.clicked.connect(self.run_analysis)
         self.plot_all_button.clicked.connect(self.plot_all_rois)
+        self.save_settings_button.clicked.connect(self.save_settings)
+        self.load_settings_button.clicked.connect(self.load_settings)
+        # When a file is selected: first auto-load its settings config (if one
+        # sits next to it), THEN autofill fs from ops.npy only if the config
+        # didn't already provide it. Order matters, so connect auto-load first.
+        self.file_list_widget.itemSelectionChanged.connect(self.autoload_settings_for_selection)
         # Auto-fill fs from Suite2p ops.npy whenever the selected file changes.
         self.file_list_widget.itemSelectionChanged.connect(self.autofill_fs_from_ops)
         self.loaded_file = None
@@ -160,7 +174,11 @@ class CalciumImagingApp(QWidget):
             return None
 
     def autofill_fs_from_ops(self):
-        """When a Suite2p .npy is selected, set the fs box to ops.npy's fs."""
+        """When a Suite2p .npy is selected, set the fs box to ops.npy's fs.
+        Skips if the auto-loaded settings config already provided an fs, so a
+        saved config takes precedence over the ops.npy fallback."""
+        if getattr(self, "_config_provided_fs", False):
+            return
         items = self.file_list_widget.selectedItems()
         if not items:
             return
@@ -179,6 +197,254 @@ class CalciumImagingApp(QWidget):
         ]
         for p in to_remove:
             p.remove()
+
+    def _baseline_kwargs(self, fs):
+        """Read the baseline/neuropil UI controls and return the kwargs for
+        load_and_preprocess. Defaults preserve the original behavior."""
+        method = ("rolling_percentile"
+                  if self.baseline_method_combo.currentIndex() == 1
+                  else "mean")
+
+        # Rolling-baseline window (seconds -> samples). Fall back to 60 s.
+        try:
+            win_sec = float(self.baseline_window_input.text())
+        except ValueError:
+            win_sec = 60.0
+        baseline_window_samples = max(1, int(round(win_sec * fs)))
+
+        try:
+            baseline_percentile = float(self.baseline_pctl_input.text())
+        except ValueError:
+            baseline_percentile = 10.0
+
+        subtract_neuropil = self.neuropil_checkbox.isChecked()
+        try:
+            neuropil_coef = float(self.neuropil_coef_input.text())
+        except ValueError:
+            neuropil_coef = 0.7
+
+        return dict(
+            baseline_method=method,
+            baseline_window_samples=baseline_window_samples,
+            baseline_percentile=baseline_percentile,
+            subtract_neuropil=subtract_neuropil,
+            neuropil_coef=neuropil_coef,
+            fs=fs,
+        )
+
+    # ------------------------------------------------------------------
+    # Cached _interpolated.npy baseline-signature tracking
+    # ------------------------------------------------------------------
+    # An _interpolated.npy freezes whatever ΔF/F baseline was active when it was
+    # written (it stores processed data, not raw F). If the baseline settings
+    # later change, the cache silently serves the OLD amplitudes. We drop a small
+    # sidecar next to each cache recording the baseline signature it was built
+    # with, and warn (without deleting) when the current settings differ.
+    def _baseline_signature(self, fs):
+        """The baseline/neuropil settings that materially affect a cached
+        _interpolated.npy, as a plain comparable dict."""
+        kw = self._baseline_kwargs(fs)
+        return {
+            'baseline_method':          kw['baseline_method'],
+            'baseline_window_samples':  kw['baseline_window_samples'],
+            'baseline_percentile':      kw['baseline_percentile'],
+            'subtract_neuropil':        kw['subtract_neuropil'],
+            'neuropil_coef':            kw['neuropil_coef'],
+            'apply_smoothing':          bool(self.savgol_checkbox.isChecked()),
+        }
+
+    def _interp_sidecar_path(self, interpolated_file):
+        """Path to the JSON sidecar for a given _interpolated.npy."""
+        return os.path.splitext(interpolated_file)[0] + "_baseline.json"
+
+    def _write_interp_signature(self, interpolated_file, fs):
+        """Record the baseline signature used to build an _interpolated.npy."""
+        try:
+            with open(self._interp_sidecar_path(interpolated_file), "w") as f:
+                json.dump(self._baseline_signature(fs), f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"[cache] Could not write baseline sidecar: {e}")
+
+    def _warn_if_cache_baseline_stale(self, interpolated_file, fs):
+        """If a cached _interpolated.npy was built with different baseline
+        settings than are active now (or predates signature tracking), warn the
+        user and point them at the file to delete. Never deletes automatically."""
+        sidecar = self._interp_sidecar_path(interpolated_file)
+        current = self._baseline_signature(fs)
+
+        saved = None
+        if os.path.exists(sidecar):
+            try:
+                with open(sidecar, "r") as f:
+                    saved = json.load(f)
+            except Exception as e:
+                print(f"[cache] Could not read baseline sidecar: {e}")
+
+        if saved == current:
+            return  # cache matches current settings — nothing to warn about
+
+        regions_csv = os.path.join(
+            os.path.dirname(interpolated_file),
+            f"{os.path.splitext(os.path.basename(interpolated_file))[0].replace('_interpolated','')}_artifact_regions.csv"
+        )
+        if saved is None:
+            detail = ("This cache predates baseline tracking, so it may have been "
+                      "built with a different ΔF/F baseline.")
+        else:
+            diffs = [k for k in current if saved.get(k) != current.get(k)]
+            detail = ("Baseline settings changed since this cache was built "
+                      f"(differs in: {', '.join(diffs)}).")
+
+        QMessageBox.warning(
+            self, "Cached data may not match current baseline",
+            f"{detail}\n\n"
+            f"The app is loading cached, already-processed data:\n"
+            f"{interpolated_file}\n\n"
+            f"It will NOT reflect the current baseline / drift-correction "
+            f"settings. To recompute from raw with the current settings, delete "
+            f"that file (and its sidecar / artifact-regions CSV) and re-run:\n\n"
+            f"  \u2022 {interpolated_file}\n"
+            f"  \u2022 {sidecar}\n"
+            f"  \u2022 {regions_csv}\n\n"
+            f"(Deleting the artifact-regions CSV also clears saved manual "
+            f"artifact removals for this recording.)"
+        )
+
+    # ------------------------------------------------------------------
+    # Settings persistence (calcify_config.json)
+    # ------------------------------------------------------------------
+    def _settings_widgets(self):
+        """Map a stable config key -> widget for every persisted UI field.
+        Used by both save_settings and load_settings so they never drift."""
+        return {
+            # QLineEdit text fields
+            'filetype':            self.filetype_combo,       # QComboBox (text)
+            'npy_filename':        self.npy_filename_input,
+            'fs':                  self.fs_input,
+            'truncate_seconds':    self.truncate_seconds_input,
+            'prominence':          self.prominence_input,
+            'min_height':          self.min_height_input,
+            'min_plateau':         self.min_plateau_input,
+            'poly_order':          self.poly_order_input,
+            'smoothing_window':    self.smoothing_window_input,
+            'baseline_method':     self.baseline_method_combo,  # QComboBox (text)
+            'baseline_window':     self.baseline_window_input,
+            'baseline_pctl':       self.baseline_pctl_input,
+            'neuropil_coef':       self.neuropil_coef_input,
+            'display_window':      self.display_window_input,
+            'yax':                 self.yax_input,
+            'pre_range':           self.pre_range_input,
+            'post_range':          self.post_range_input,
+            # QCheckBox fields
+            'savgol':              self.savgol_checkbox,
+            'neuropil_subtract':   self.neuropil_checkbox,
+            'transpose':           self.transpose_checkbox,
+            'cell_filter':         self.cell_filter_checkbox,
+        }
+
+    def _collect_settings(self):
+        """Read every persisted widget into a plain dict of typed values."""
+        out = {}
+        for key, w in self._settings_widgets().items():
+            if isinstance(w, QCheckBox):
+                out[key] = bool(w.isChecked())
+            elif isinstance(w, QComboBox):
+                out[key] = w.currentText()
+            else:  # QLineEdit
+                out[key] = w.text()
+        return out
+
+    def _apply_settings(self, cfg):
+        """Set every persisted widget from a config dict. Missing keys are
+        left untouched so partial/old config files still load cleanly."""
+        for key, w in self._settings_widgets().items():
+            if key not in cfg:
+                continue
+            val = cfg[key]
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(val))
+            elif isinstance(w, QComboBox):
+                idx = w.findText(str(val))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+            else:  # QLineEdit
+                w.setText("" if val is None else str(val))
+
+    def _config_path_for_selection(self):
+        """Path to calcify_config.json in the SELECTED file's folder, or None
+        if nothing is selected."""
+        items = self.file_list_widget.selectedItems()
+        if not items:
+            return None
+        return os.path.join(os.path.dirname(items[0].text()),
+                            "calcify_config.json")
+
+    def save_settings(self):
+        """Silently write current parameter fields to calcify_config.json in the
+        selected recording's folder. No dialog: the config lives next to the
+        data it describes so it auto-loads next time that file is selected."""
+        path = self._config_path_for_selection()
+        if path is None:
+            QMessageBox.warning(self, "No selection",
+                                "Select a recording first so settings can be "
+                                "saved next to it.")
+            return
+        try:
+            with open(path, "w") as f:
+                json.dump(self._collect_settings(), f, indent=2, sort_keys=True)
+            print(f"[settings] Saved settings to {path}")
+            QMessageBox.information(self, "Settings Saved",
+                                    f"Settings saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Failed",
+                                f"Could not save settings:\n{e}")
+
+    def autoload_settings_for_selection(self):
+        """When a file is selected, silently load calcify_config.json from its
+        folder if one exists. Sets _config_provided_fs so the ops.npy autofill
+        knows whether to defer. No dialog and no popup on success."""
+        self._config_provided_fs = False
+        path = self._config_path_for_selection()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise ValueError("config file is not a JSON object")
+            self._apply_settings(cfg)
+            # Record whether the config supplied a usable fs, so ops-autofill
+            # defers to it instead of overwriting.
+            fs_val = cfg.get('fs', None)
+            self._config_provided_fs = bool(fs_val not in (None, ""))
+            print(f"[settings] Auto-loaded settings from {path}")
+        except Exception as e:
+            # Never interrupt file selection with a modal on a bad config;
+            # just warn to the console.
+            print(f"[settings] Could not auto-load {path}: {e}")
+
+    def load_settings(self):
+        """Manual load via file dialog (fallback / load-from-elsewhere)."""
+        sel = self._config_path_for_selection()
+        start_dir = os.path.dirname(sel) if sel else (
+            self.csv_folder_path or self.npy_folder_path or os.getcwd())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Settings", start_dir, "JSON config (*.json)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise ValueError("config file is not a JSON object")
+            self._apply_settings(cfg)
+            print(f"[settings] Loaded settings from {path}")
+            QMessageBox.information(self, "Settings Loaded",
+                                    f"Settings loaded from:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Load Failed",
+                                f"Could not load settings:\n{e}")
 
     def apply_truncation(self, df, fs):
         truncate_seconds = float(self.truncate_seconds_input.text())
@@ -397,6 +663,7 @@ class CalciumImagingApp(QWidget):
         # Load interpolated file if it exists, otherwise preprocess
         if os.path.exists(interpolated_file):
             print(f"Loading interpolated data from {interpolated_file}")
+            self._warn_if_cache_baseline_stale(interpolated_file, fs)
             smoothed_dff_df = pd.DataFrame(
                 np.array(np.load(interpolated_file, allow_pickle=True), dtype=float, copy=True),
                 index=getattr(self, 'original_index', None),
@@ -432,7 +699,8 @@ class CalciumImagingApp(QWidget):
                 smoothing_window_length,
                 poly_order,
                 include_only_cells=self.cell_filter_checkbox.isChecked(),
-                apply_smoothing=self.savgol_checkbox.isChecked()
+                apply_smoothing=self.savgol_checkbox.isChecked(),
+                **self._baseline_kwargs(fs)
             )
     
             self.original_index = smoothed_dff_df.index
@@ -658,6 +926,13 @@ class CalciumImagingApp(QWidget):
                 interpolated_file = os.path.join(export_dir, f"{file_prefix}_interpolated.npy")
                 np.save(interpolated_file, self.current_data.values)
                 print(f"Interpolated data saved to {interpolated_file}")
+                # Record the baseline settings this cache was built with, so a
+                # later load can warn if the settings have since changed.
+                try:
+                    _fs_sig = float(self.fs_input.text())
+                    self._write_interp_signature(interpolated_file, _fs_sig)
+                except ValueError:
+                    pass
     
         # Replot updated data
         fs = float(self.fs_input.text())
@@ -780,6 +1055,7 @@ class CalciumImagingApp(QWidget):
         
         if os.path.exists(interpolated_file):
             print(f"Loading interpolated data from {interpolated_file}")
+            self._warn_if_cache_baseline_stale(interpolated_file, fs)
             smoothed_dff_df = pd.DataFrame(
                 np.array(np.load(interpolated_file, allow_pickle=True), dtype=float, copy=True),
                 index=getattr(self, 'original_index', None),
@@ -800,7 +1076,8 @@ class CalciumImagingApp(QWidget):
                 smoothing_window_length,
                 poly_order,
                 include_only_cells=self.cell_filter_checkbox.isChecked(),
-                apply_smoothing=self.savgol_checkbox.isChecked()
+                apply_smoothing=self.savgol_checkbox.isChecked(),
+                **self._baseline_kwargs(fs)
             )
             self.original_index = smoothed_dff_df.index
             self.original_columns = smoothed_dff_df.columns
@@ -829,19 +1106,38 @@ class CalciumImagingApp(QWidget):
             f for f in os.listdir(export_dir)
             if 'filtered_peaks' in f and f.endswith('.csv')
             and 'timelocked' not in f
+            and 'averaged' not in f
         ]
         if candidates:
-            # Prefer one whose prefix matches this recording, else first.
+            # Prefer the exact "<prefix>_filtered_peaks.csv", then a prefix
+            # match, then whatever's left.
             base = os.path.basename(file_prefix)
-            preferred = [c for c in candidates if base and base in c]
-            chosen = preferred[0] if preferred else candidates[0]
+            exact = f"{base}_filtered_peaks.csv"
+            if exact in candidates:
+                chosen = exact
+            else:
+                preferred = [c for c in candidates if base and base in c]
+                chosen = preferred[0] if preferred else candidates[0]
             filtered_csv = os.path.join(export_dir, chosen)
 
         if filtered_csv is not None and os.path.exists(filtered_csv):
             print(f"Loading filtered peaks from: {filtered_csv}")
             peak_results_df = pd.read_csv(filtered_csv)
-            csv_times = peak_results_df['peak_time'].values[:5]
-            print("First 5 peak_time from CSV:", csv_times)
+
+            missing = {'peak_time'} - set(peak_results_df.columns)
+            if missing:
+                print(f"[WARN] {os.path.basename(filtered_csv)} lacks {missing} — "
+                      f"not a peak-level file. Falling back to detection.")
+                peak_results_df = load_or_detect_peaks(
+                    app=self,
+                    file_path=selected_file,
+                    smoothed_dff_df=smoothed_dff_df,
+                    fs=fs,
+                    **peak_params
+                )
+            else:
+                print("First 5 peak_time from CSV:",
+                      peak_results_df['peak_time'].values[:5])
         else:
             # Fall back to dynamic peak detection
             peak_results_df = load_or_detect_peaks(
@@ -851,6 +1147,20 @@ class CalciumImagingApp(QWidget):
                 fs=fs,
                 **peak_params
             )
+
+        # If detection/loading produced nothing, don't abort — the user still
+        # wants the interactive figure so they can inspect traces, adjust, and
+        # add peaks manually. Build an empty peak table with the expected
+        # columns and carry on. (A None result also lands here.)
+        _expected_peak_cols = [
+            'cell_id', 'peak_time', 'left_bases', 'right_bases',
+            'prominences', 'base_value', 'peak_value', 'auc',
+            'time_to_peak', 'half_rise_time', 'half_decay_time'
+        ]
+        if peak_results_df is None or peak_results_df.empty:
+            print("[INFO] No peaks available — launching interactive figure "
+                  "with an empty peak set so peaks can be added manually.")
+            peak_results_df = pd.DataFrame(columns=_expected_peak_cols)
         # ------------------------------------------------
         # Initialize base-related columns (required downstream)
         # ------------------------------------------------
@@ -864,11 +1174,23 @@ class CalciumImagingApp(QWidget):
             peak_results_df[col] = peak_results_df[col].astype(float)
 
         # --- Handle peak indices ---
-        peak_results_df['peak_idx'] = (peak_results_df['peak_time'] * fs).astype(int)
+        # Coerce peak_time to numeric first so an empty/object-dtype column
+        # (the no-peaks case) doesn't choke .astype(int).
+        peak_results_df['peak_time'] = pd.to_numeric(
+            peak_results_df['peak_time'], errors='coerce')
+        if peak_results_df.empty:
+            peak_results_df['peak_idx'] = pd.Series(dtype=int)
+        else:
+            peak_results_df['peak_idx'] = (
+                peak_results_df['peak_time'] * fs).astype(int)
         print("\n>>> PEAK INDEX CHECK")
         print("Total peaks:", len(peak_results_df))
-        print("Min peak_idx:", peak_results_df['peak_idx'].min())
-        print("Max peak_idx:", peak_results_df['peak_idx'].max())
+        if not peak_results_df.empty:
+            print("Min peak_idx:", peak_results_df['peak_idx'].min())
+            print("Max peak_idx:", peak_results_df['peak_idx'].max())
+        else:
+            print("Min peak_idx: (none)")
+            print("Max peak_idx: (none)")
         print("Data length:", smoothed_dff_df.shape[1])
 
         # Ensure 'cell_id' exists
@@ -892,13 +1214,17 @@ class CalciumImagingApp(QWidget):
         smoothed_dff_df.index = smoothed_dff_df.index.str.replace('ROI_', '', regex=False)
     
         # --- Filter peaks to only valid ROIs present in smoothed_dff_df ---
+        had_peaks_before_filter = not peak_results_df.empty
         valid_rois = smoothed_dff_df.index
         peak_results_df = peak_results_df[peak_results_df['cell_id'].isin(valid_rois)]
         peak_results_df = peak_results_df.reset_index(drop=True)
 
         # --- Debug: Print IDs if none match ---
-        if peak_results_df.empty:
-            print("CSV IDs:", peak_results_df['cell_id'].unique())
+        # Only treat this as an error when peaks actually existed but none of
+        # their ROIs matched the loaded data (a real ID mismatch). If there
+        # were simply no peaks, fall through and launch the figure empty so the
+        # user can add peaks manually.
+        if peak_results_df.empty and had_peaks_before_filter:
             print("NPY ROI indices:", smoothed_dff_df.index.unique())
             QMessageBox.warning(
                 self, "Error",

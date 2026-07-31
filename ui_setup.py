@@ -88,6 +88,41 @@ def build_ui(parent):
     ui_elements['savgol_checkbox'].setChecked(True)
     layout.addWidget(ui_elements['savgol_checkbox'])
 
+    # --------------------------------------------------------------
+    # ΔF/F baseline (F0) method
+    # --------------------------------------------------------------
+    # "Whole-trace mean" is the original Calcify behavior. "Rolling percentile"
+    # reproduces the standalone drift-correction script: a time-varying F0 that
+    # rides under the transients and tracks slow drift (photobleaching/z-drift),
+    # which also changes the amplitude scale to match that script.
+    layout.addWidget(QLabel("ΔF/F baseline (F0) method:"))
+    ui_elements['baseline_method_combo'] = QComboBox()
+    ui_elements['baseline_method_combo'].addItems(
+        ["Whole-trace mean", "Rolling percentile (drift correction)"]
+    )
+    layout.addWidget(ui_elements['baseline_method_combo'])
+
+    layout.addWidget(QLabel("Rolling baseline window (sec):"))
+    ui_elements['baseline_window_input'] = QLineEdit("60")
+    layout.addWidget(ui_elements['baseline_window_input'])
+
+    layout.addWidget(QLabel("Rolling baseline percentile (0-100):"))
+    ui_elements['baseline_pctl_input'] = QLineEdit("10")
+    layout.addWidget(ui_elements['baseline_pctl_input'])
+
+    # --------------------------------------------------------------
+    # Neuropil subtraction (Suite2p NPY only): F - coef * Fneu
+    # --------------------------------------------------------------
+    ui_elements['neuropil_checkbox'] = QCheckBox(
+        "Subtract neuropil (F - coef*Fneu; Suite2p NPY only)"
+    )
+    ui_elements['neuropil_checkbox'].setChecked(False)
+    layout.addWidget(ui_elements['neuropil_checkbox'])
+
+    layout.addWidget(QLabel("Neuropil coefficient:"))
+    ui_elements['neuropil_coef_input'] = QLineEdit("0.7")
+    layout.addWidget(ui_elements['neuropil_coef_input'])
+
     layout.addWidget(QLabel("Zoomed In Display Window (sec):"))
     ui_elements['display_window_input'] = QLineEdit("200")
     layout.addWidget(ui_elements['display_window_input'])
@@ -114,6 +149,14 @@ def build_ui(parent):
 
     ui_elements['run_button'] = QPushButton("Run Analysis")
     layout.addWidget(ui_elements['run_button'])
-    
+
+    # Settings persistence: save the current parameter fields to a
+    # calcify_config.json (typed, no extra dependencies) and load them back.
+    ui_elements['save_settings_button'] = QPushButton("Save Settings")
+    layout.addWidget(ui_elements['save_settings_button'])
+
+    ui_elements['load_settings_button'] = QPushButton("Load Settings")
+    layout.addWidget(ui_elements['load_settings_button'])
+
     # Return the layout and UI elements dictionary
     return layout, ui_elements
