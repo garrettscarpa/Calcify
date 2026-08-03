@@ -23,7 +23,7 @@ Get the latest build for your machine from the [Releases](../../releases) page.
 | --- | --- |
 | macOS (Apple Silicon — M1/M2/M3/M4) | `Calcify-macOS-AppleSilicon.zip` |
 | macOS (Intel) | `Calcify-macOS-Intel.zip` |
-| Windows | `Calcify-v1.0.2-windows.zip` |
+| Windows | `Calcify-windows.zip` |
 
 Unzip the download, then move `Calcify.app` (macOS) into your Applications folder, or run it from wherever you like.
 
