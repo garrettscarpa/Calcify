@@ -1,7 +1,32 @@
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
     QListWidget, QAbstractItemView
 )
+
+
+class NoWheelComboBox(QComboBox):
+    """QComboBox that NEVER changes its value from the mouse wheel / trackpad
+    scroll, whether or not it has keyboard focus.
+
+    The form lives in a scroll area; without this, scrolling the page while the
+    pointer is over a combo silently changes it (e.g. dF/F baseline method, or
+    file type CSV -> NPY). On Windows a combo typically keeps focus after it has
+    been clicked or tabbed through, so a "only ignore when unfocused" rule still
+    let scrolling change it. The value can only be changed by opening the
+    dropdown (click) and choosing an item, or with the keyboard.
+
+    The wheel event is ignored (not swallowed), so it propagates to the parent
+    scroll area and the page still scrolls normally.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Don't take focus just from the wheel; click/tab still give focus.
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 def build_ui(parent):
     """
@@ -25,7 +50,7 @@ def build_ui(parent):
 
     # File type dropdown
     layout.addWidget(QLabel("Select file type:"))
-    ui_elements['filetype_combo'] = QComboBox()
+    ui_elements['filetype_combo'] = NoWheelComboBox()
     ui_elements['filetype_combo'].addItems(["CSV", "NPY"])
     layout.addWidget(ui_elements['filetype_combo'])
 
@@ -96,7 +121,7 @@ def build_ui(parent):
     # rides under the transients and tracks slow drift (photobleaching/z-drift),
     # which also changes the amplitude scale to match that script.
     layout.addWidget(QLabel("ΔF/F baseline (F0) method:"))
-    ui_elements['baseline_method_combo'] = QComboBox()
+    ui_elements['baseline_method_combo'] = NoWheelComboBox()
     ui_elements['baseline_method_combo'].addItems(
         ["Whole-trace mean", "Rolling percentile (drift correction)"]
     )

@@ -692,20 +692,34 @@ class InteractionHandler:
     def _extract_aligned_peaks(self, peaks_df, pre_pad_s, post_pad_s, expand=1.0):
         """Extract each peak from its ROI trace onto a common time grid centred
         on the peak (t=0 at the peak). Returns (t_grid, matrix) where matrix is
-        (n_peaks x n_timepoints); peaks that don't fully fit are skipped.
+        (n_peaks x n_timepoints).
 
-        expand : widen the extracted window by this factor beyond pre/post_pad
-            on each side. Extracting wider than the default view gives the
-            zoom-out slider real data to reveal instead of empty axes. Peaks
-            whose widened window runs off the recording are dropped, so a large
-            factor can reduce n; the caller balances this.
+        A peak is kept when its DEFAULT window (pre_pad_s before to post_pad_s
+        after the peak) fits inside the recording. The extra width added by
+        `expand` (there so the zoom-out slider has data to reveal) is allowed
+        to run off the recording: those samples are left as NaN and the
+        summary statistics are NaN-aware. (Previously a peak was dropped if the
+        *expanded* window didn't fit, so with slow transients - where the
+        median peak-to-base distance is tens of seconds - the 3x window was
+        longer than the whole recording and every peak was discarded.)
+
+        The expanded grid is also capped so it is never longer than the
+        recording itself.
 
         Amplitude is baseline-subtracted per peak (base = min of the two bases),
-        so the average represents ΔF/F above baseline and shading reflects
+        so the average represents dF/F above baseline and shading reflects
         peak-to-peak variability rather than differing DC offsets."""
-        pre_n = int(round(pre_pad_s * expand * self.fs))
-        post_n = int(round(post_pad_s * expand * self.fs))
+        n_rec = self.trace.shape[1]
+        tight_pre = int(round(pre_pad_s * self.fs))
+        tight_post = int(round(post_pad_s * self.fs))
+
+        # Cap the expansion so the whole grid fits within the recording length.
+        expand_eff = max(1.0, min(float(expand),
+                                  n_rec / float(tight_pre + tight_post + 1)))
+        pre_n = int(round(pre_pad_s * expand_eff * self.fs))
+        post_n = int(round(post_pad_s * expand_eff * self.fs))
         t_grid = np.arange(-pre_n, post_n + 1) / self.fs
+        L = t_grid.size
 
         rows = []
         for _, r in peaks_df.iterrows():
@@ -714,10 +728,16 @@ class InteractionHandler:
                 continue
             tr = self.trace.loc[cell].values.astype(float)
             peak_idx = int(round(r['peak_time'] * self.fs))
+
+            # Require the default (tight) window to fit fully.
+            if peak_idx - tight_pre < 0 or peak_idx + tight_post >= len(tr):
+                continue
+
+            # Copy the overlapping part of the expanded window; NaN elsewhere.
             lo, hi = peak_idx - pre_n, peak_idx + post_n
-            if lo < 0 or hi >= len(tr):
-                continue  # window doesn't fully fit; skip to keep grid aligned
-            seg = tr[lo:hi + 1].astype(float)
+            src_lo, src_hi = max(lo, 0), min(hi, len(tr) - 1)
+            seg = np.full(L, np.nan)
+            seg[src_lo - lo: src_lo - lo + (src_hi - src_lo + 1)] = tr[src_lo:src_hi + 1]
 
             # Baseline = min of the two base values (same convention as detection)
             lb, rb = r.get('left_bases'), r.get('right_bases')
@@ -726,24 +746,27 @@ class InteractionHandler:
                 rb_i = int(np.clip(round(rb * self.fs), 0, len(tr) - 1))
                 base = min(tr[lb_i], tr[rb_i])
             else:
-                base = seg.min()
+                base = np.nanmin(seg)
             rows.append(seg - base)
 
         if not rows:
             return t_grid, np.empty((0, t_grid.size))
-
-        # Peaks near the recording edges yield shorter/longer segments only if
-        # rounding differs; guard by trimming/padding to the common grid length.
-        L = t_grid.size
-        rows = [row[:L] if row.size >= L else
-                np.concatenate([row, np.full(L - row.size, np.nan)])
-                for row in rows]
         return t_grid, np.vstack(rows)
 
     def _window_padding(self, peaks_df):
-        """Choose a symmetric extraction window from the peak set. Uses the
-        median gap from peak to each base so the representative peak captures a
-        typical rise and decay without being dominated by outliers."""
+        """Choose a symmetric extraction window from the peak set.
+
+        Starts from the median gap from peak to each base (so the representative
+        peak captures a typical rise and decay), then shrinks that window - but
+        never below 50% of the median on either side - to the size that lets the
+        MOST peaks fit fully inside the recording.
+
+        Why: find_peaks places bases at the lowest points before a higher peak or
+        the trace edge, so for slow/isolated events the bases can sit at the very
+        start and end of the recording. The median window can then be nearly as
+        long as the recording itself, and only peaks in a narrow central band fit
+        (in one real dataset: 1 of 6 peaks). Fitting the window to the recording
+        keeps far more peaks in the average."""
         rise = (peaks_df['peak_time'] - peaks_df['left_bases']).dropna()
         decay = (peaks_df['right_bases'] - peaks_df['peak_time']).dropna()
         # Fall back to a small fixed window if bases are missing.
@@ -752,6 +775,41 @@ class InteractionHandler:
         # Guard against degenerate/zero windows.
         pre_pad = max(pre_pad, 1.0 / self.fs * 5)
         post_pad = max(post_pad, 1.0 / self.fs * 5)
+
+        # ---- shrink to fit the recording (see docstring) ----
+        n_rec = self.trace.shape[1]
+        pt = pd.to_numeric(peaks_df['peak_time'], errors='coerce').dropna()
+        idx = np.round(pt.values * self.fs).astype(int)
+        idx = idx[(idx >= 0) & (idx < n_rec)]
+        if idx.size == 0:
+            return pre_pad, post_pad
+
+        pre_med_n = max(1, int(round(pre_pad * self.fs)))
+        post_med_n = max(1, int(round(post_pad * self.fs)))
+        pre_floor = min(pre_med_n, max(5, int(np.ceil(0.5 * pre_med_n))))
+        post_floor = min(post_med_n, max(5, int(np.ceil(0.5 * post_med_n))))
+
+        room_pre = idx                      # samples available before each peak
+        room_post = n_rec - 1 - idx         # samples available after each peak
+
+        pre_cands = np.unique(np.clip(np.append(room_pre, pre_med_n),
+                                      pre_floor, pre_med_n))
+        post_cands = np.unique(np.clip(np.append(room_post, post_med_n),
+                                       post_floor, post_med_n))
+
+        best = (-1, -1, pre_med_n, post_med_n)     # (kept, total window, pre, post)
+        for a in pre_cands:
+            sub = np.sort(room_post[room_pre >= a])
+            if sub.size == 0:
+                continue
+            # peaks kept for each candidate post window b: those with room_post >= b
+            kept = sub.size - np.searchsorted(sub, post_cands, side='left')
+            for b, k in zip(post_cands, kept):
+                cand = (int(k), int(a + b), int(a), int(b))
+                if cand[:2] > best[:2]:
+                    best = cand
+        if best[0] > 0:
+            pre_pad, post_pad = best[2] / self.fs, best[3] / self.fs
         return pre_pad, post_pad
 
     def _draw_representative_axis(self, ax, t, mat, color, title, shade='sem'):
@@ -854,7 +912,13 @@ class InteractionHandler:
             if not usable:
                 QMessageBox.warning(None, "No Peaks in Range",
                                     "Peaks were found in the time range(s) but "
-                                    "none fit fully within the averaging window.")
+                                    "none fit fully within the averaging window "
+                                    f"(-{pre_pad:.1f} s to +{post_pad:.1f} s around "
+                                    f"each peak; recording is "
+                                    f"{self.trace.shape[1] / self.fs:.1f} s). The "
+                                    "window comes from the median distance to "
+                                    "each peak's bases, which is long for slow "
+                                    "transients.")
                 return
 
             fig, axes = plt.subplots(1, len(usable),
@@ -905,7 +969,12 @@ class InteractionHandler:
             if mat.shape[0] == 0:
                 QMessageBox.warning(None, "No Peaks",
                                     "No peaks fit fully within the averaging "
-                                    "window.")
+                                    f"window (-{pre_pad:.1f} s to +{post_pad:.1f} s "
+                                    f"around each peak; recording is "
+                                    f"{self.trace.shape[1] / self.fs:.1f} s). The "
+                                    "window comes from the median distance to "
+                                    "each peak's bases, which is long for slow "
+                                    "transients.")
                 return
             fig, ax = plt.subplots(figsize=(5.5, 4.5))
             self._draw_representative_axis(

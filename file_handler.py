@@ -47,11 +47,14 @@ def populate_file_list(app):
     if file_type == "CSV":
         file_list = glob.glob(os.path.join(folder_path, '**', '*.csv'), recursive=True)
 
-        # Exclude any CSVs that contain these substrings
-        excluded_substrings = ['filtered_peaks', 'Individual_ROI_Statistics']
+        # Exclude Calcify's own output/auxiliary CSVs (matched case-insensitively).
+        excluded_substrings = [
+            'filtered_peaks', 'individual_roi_statistics',
+            'peak_roi_traces', 'artifact_regions',
+        ]
         file_list = [
             f for f in file_list
-            if not any(sub in os.path.basename(f) for sub in excluded_substrings)
+            if not any(sub in os.path.basename(f).lower() for sub in excluded_substrings)
         ]
     else:
         npy_filename = app.npy_filename_input.text().strip()
