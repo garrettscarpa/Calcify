@@ -354,11 +354,12 @@ class CalciumImagingApp(QWidget):
                 out[key] = w.text()
         return out
 
-    def _apply_settings(self, cfg):
+    def _apply_settings(self, cfg, skip=()):
         """Set every persisted widget from a config dict. Missing keys are
-        left untouched so partial/old config files still load cleanly."""
+        left untouched so partial/old config files still load cleanly.
+        Keys in `skip` are ignored (used by auto-load, see below)."""
         for key, w in self._settings_widgets().items():
-            if key not in cfg:
+            if key not in cfg or key in skip:
                 continue
             val = cfg[key]
             if isinstance(w, QCheckBox):
@@ -412,7 +413,15 @@ class CalciumImagingApp(QWidget):
                 cfg = json.load(f)
             if not isinstance(cfg, dict):
                 raise ValueError("config file is not a JSON object")
-            self._apply_settings(cfg)
+            # Auto-load runs inside the file-list selection handler, so it must
+            # never change the file type (a config saved in an NPY session would
+            # flip the app to NPY when a CSV is selected) and must not touch the
+            # NPY filename box while in CSV mode (its textChanged signal
+            # repopulates/clears the very list the user just selected from).
+            skip = {'filetype'}
+            if self.filetype_combo.currentText().upper() != "NPY":
+                skip.add('npy_filename')
+            self._apply_settings(cfg, skip=skip)
             # Record whether the config supplied a usable fs, so ops-autofill
             # defers to it instead of overwriting.
             fs_val = cfg.get('fs', None)
@@ -445,6 +454,23 @@ class CalciumImagingApp(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Load Failed",
                                 f"Could not load settings:\n{e}")
+
+    def _load_signature(self, selected_file, fs):
+        """Everything that changes what load_and_preprocess would return.
+        If any of it changes, cached self.current_data is stale and must be
+        reloaded (previously only file/transpose/cell_filter were tracked, so
+        switching baseline method silently reused old, already-truncated data)."""
+        return (
+            selected_file,
+            self.transpose_checkbox.isChecked(),
+            self.cell_filter_checkbox.isChecked(),
+            self.filetype_combo.currentText(),
+            fs,
+            self.truncate_seconds_input.text(),
+            self.smoothing_window_input.text(),
+            self.poly_order_input.text(),
+            tuple(sorted(self._baseline_signature(fs).items())),
+        )
 
     def apply_truncation(self, df, fs):
         truncate_seconds = float(self.truncate_seconds_input.text())
@@ -652,9 +678,7 @@ class CalciumImagingApp(QWidget):
         export_dir = os.path.dirname(selected_file)
         interpolated_file = os.path.join(export_dir, f"{file_prefix}_interpolated.npy")
         
-        transpose = self.transpose_checkbox.isChecked()
-        cell_filter = self.cell_filter_checkbox.isChecked()
-        load_settings = (selected_file, transpose, cell_filter)
+        load_settings = self._load_signature(selected_file, fs)
         
         if self._last_load_settings != load_settings:
             self.current_data = None          # Force a fresh load
@@ -669,14 +693,10 @@ class CalciumImagingApp(QWidget):
                 index=getattr(self, 'original_index', None),
                 columns=getattr(self, 'original_columns', None)
             )
-            truncate_seconds = float(self.truncate_seconds_input.text())
-            truncate_samples = int(truncate_seconds * fs)
-            
-            smoothed_dff_df = self.apply_truncation(smoothed_dff_df, fs)
+            # The cache was saved from already-truncated data, and its artifact
+            # regions are in truncated coordinates: do NOT truncate/shift again.
             self.current_data = smoothed_dff_df.copy()
-            
             self.load_artifact_regions(fs, export_dir, file_prefix)
-            self.adjust_artifact_regions_for_truncation(truncate_samples)
 
         elif self.current_data is not None:
             smoothed_dff_df = self.current_data.copy()
@@ -969,15 +989,6 @@ class CalciumImagingApp(QWidget):
         if not selected_file.lower().endswith(valid_ext):
             QMessageBox.warning(self, "Invalid file type", f"Please select a {valid_ext} file.")
             return
-        transpose = self.transpose_checkbox.isChecked()
-        cell_filter = self.cell_filter_checkbox.isChecked()
-        load_settings = (selected_file, transpose, cell_filter)
-        
-        if self._last_load_settings != load_settings:
-            self.current_data = None          # Force a fresh load
-            self._last_load_settings = load_settings
-                
-        
         # --- Reset analysis state if the selected file changed ---
         if self.loaded_file != selected_file:
             print("[INFO] New file selected — resetting analysis state")
@@ -1031,6 +1042,13 @@ class CalciumImagingApp(QWidget):
             else:
                 print(f"[run_analysis] Proceeding with user fs = {fs:g} Hz "
                       f"(ops.npy says {detected_fs:.6g})")
+
+        # --- Invalidate cached data if ANY load-affecting setting changed ---
+        # (must come after fs is finalised, since fs feeds the signature)
+        load_settings = self._load_signature(selected_file, fs)
+        if self._last_load_settings != load_settings:
+            self.current_data = None          # Force a fresh load
+            self._last_load_settings = load_settings
 
         # --- Optional peak detection parameters ---
         peak_params = {}
@@ -1088,12 +1106,11 @@ class CalciumImagingApp(QWidget):
             if self.current_data is not None:
                 smoothed_dff_df = self.current_data.copy()
         
-        # ------------------------------------------------
-        # Apply truncation and realignment (critical)
-        # ------------------------------------------------
-        smoothed_dff_df = self.apply_truncation(smoothed_dff_df, fs)
+        # All three branches above (interpolated cache, cached current_data,
+        # fresh load_and_preprocess) already return truncated data, and artifact
+        # regions are stored in truncated coordinates, so no further truncation
+        # or region shifting is applied here.
         self.current_data = smoothed_dff_df.copy()
-        self.adjust_artifact_regions_for_truncation(truncate_samples)
         
 
         # --- Find filtered peaks CSV dynamically ---
